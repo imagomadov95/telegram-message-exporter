@@ -1,0 +1,9 @@
+node_modules/
+package-lock.json
+*.log
+.env
+.DS_Store
+extracted_messages.json
+extracted_messages.txt
+sb-chr.json
+.idea/
