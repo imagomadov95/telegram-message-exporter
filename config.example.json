@@ -1,0 +1,6 @@
+{
+  "telegram": {
+    "apiId": "YOUR_API_ID_HERE",
+    "apiHash": "YOUR_API_HASH_HERE"
+  }
+}

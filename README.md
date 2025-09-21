@@ -14,22 +14,44 @@
 
 ## Установка
 
-1. Клонируйте или скачайте проект
+1. Клонируйте проект:
+```bash
+git clone <URL_РЕПОЗИТОРИЯ>
+cd telegram-message-exporter
+```
+
 2. Установите зависимости:
 ```bash
 npm install
+```
+
+3. Настройте конфигурацию:
+```bash
+cp config.example.json config.json
+```
+
+4. Отредактируйте `config.json` и добавьте ваши API данные:
+```json
+{
+  "telegram": {
+    "apiId": "YOUR_API_ID_HERE",
+    "apiHash": "YOUR_API_HASH_HERE"
+  }
+}
 ```
 
 ## Использование
 
 1. Запустите приложение:
 ```bash
+npm run message
+```
+или
+```bash
 node index.js
 ```
 
 2. Введите запрашиваемые данные:
-   - API ID (из my.telegram.org)
-   - API Hash (из my.telegram.org)
    - Session string (оставьте пустым при первом запуске)
    - Номер телефона
    - Код подтверждения из Telegram

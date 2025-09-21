@@ -16,8 +16,16 @@ class TelegramMessageExporter {
     async initialize() {
         console.log('=== Telegram Message Exporter ===\n');
         
-        this.apiId = 28681983;
-        this.apiHash = '9ffc62eec28bf23e73d3f491e5158d5a';
+        // Load configuration
+        try {
+            const config = JSON.parse(fs.readFileSync('config.json', 'utf8'));
+            this.apiId = config.telegram.apiId;
+            this.apiHash = config.telegram.apiHash;
+        } catch (error) {
+            console.error('Error loading config.json. Please copy config.example.json to config.json and fill in your API credentials.');
+            console.error('You can get API credentials from https://my.telegram.org/apps');
+            process.exit(1);
+        }
         
         const sessionString = await input.text('Enter session string (leave empty for new session): ');
         if (sessionString) {

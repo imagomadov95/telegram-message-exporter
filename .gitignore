@@ -7,3 +7,6 @@ extracted_messages.json
 extracted_messages.txt
 sb-chr.json
 .idea/
+config.json
+*_messages_*.json
+*_messages_*.csv
