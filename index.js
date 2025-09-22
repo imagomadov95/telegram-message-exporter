@@ -11,6 +11,48 @@ class TelegramMessageExporter {
         this.apiHash = null;
         this.session = new StringSession('');
         this.client = null;
+        this.sessionFile = 'telegram_session.txt';
+    }
+
+    loadSavedSession() {
+        try {
+            if (fs.existsSync(this.sessionFile)) {
+                const sessionString = fs.readFileSync(this.sessionFile, 'utf8').trim();
+                if (sessionString) {
+                    console.log('Found saved session, attempting to use it...');
+                    this.session = new StringSession(sessionString);
+                    return true;
+                }
+            }
+        } catch (error) {
+            console.log('Error loading saved session:', error.message);
+        }
+        return false;
+    }
+
+    saveSession() {
+        try {
+            if (this.client && this.client.session) {
+                const sessionString = this.client.session.save();
+                fs.writeFileSync(this.sessionFile, sessionString, 'utf8');
+                console.log(`Session saved to ${this.sessionFile}`);
+                return true;
+            }
+        } catch (error) {
+            console.error('Error saving session:', error.message);
+        }
+        return false;
+    }
+
+    clearSavedSession() {
+        try {
+            if (fs.existsSync(this.sessionFile)) {
+                fs.unlinkSync(this.sessionFile);
+                console.log('Saved session cleared.');
+            }
+        } catch (error) {
+            console.error('Error clearing session:', error.message);
+        }
     }
 
     async initialize() {
@@ -27,9 +69,19 @@ class TelegramMessageExporter {
             process.exit(1);
         }
         
-        const sessionString = await input.text('Enter session string (leave empty for new session): ');
-        if (sessionString) {
-            this.session = new StringSession(sessionString);
+        // Try to load saved session
+        const hasSession = this.loadSavedSession();
+        
+        if (!hasSession) {
+            console.log('No saved session found.');
+            const useManualSession = await input.text('Do you want to enter session string manually? (y/n): ');
+            
+            if (useManualSession.toLowerCase() === 'y' || useManualSession.toLowerCase() === 'yes') {
+                const sessionString = await input.text('Enter session string: ');
+                if (sessionString) {
+                    this.session = new StringSession(sessionString);
+                }
+            }
         }
 
         this.client = new TelegramClient(this.session, this.apiId, this.apiHash, {
@@ -39,16 +91,37 @@ class TelegramMessageExporter {
 
     async authenticate() {
         console.log('\nConnecting to Telegram...');
+        
+        try {
+            const isConnected = await this.client.connect();
+            
+            if (await this.client.checkAuthorization()) {
+                console.log('Successfully connected using saved session!');
+                return true;
+            }
+        } catch (error) {
+            console.log('Saved session is invalid, need to re-authenticate...');
+            this.clearSavedSession();
+            this.session = new StringSession('');
+            this.client = new TelegramClient(this.session, this.apiId, this.apiHash, {
+                connectionRetries: 5,
+            });
+        }
+        
+        // Need to authenticate with phone number
         await this.client.start({
             phoneNumber: async () => await input.text('Enter your phone number: '),
-            password: async () => await input.text('Enter your password: '),
+            password: async () => await input.text('Enter your password (if required): '),
             phoneCode: async () => await input.text('Enter the code you received: '),
-            onError: (err) => console.log('Error:', err),
+            onError: (err) => console.log('Authentication error:', err),
         });
 
-        console.log('Successfully connected!');
-        console.log('Save this session string for future use:');
-        console.log(this.client.session.save());
+        console.log('Successfully authenticated!');
+        
+        // Save session automatically
+        this.saveSession();
+        
+        return true;
     }
 
     async getDialogs() {
@@ -311,6 +384,174 @@ class TelegramMessageExporter {
         return filePath;
     }
 
+    async loadExistingMessages(filePath) {
+        try {
+            if (!fs.existsSync(filePath)) {
+                return [];
+            }
+            
+            const content = fs.readFileSync(filePath, 'utf8');
+            const data = JSON.parse(content);
+            
+            // Если это файл с сообщениями из группы
+            if (Array.isArray(data)) {
+                return data;
+            }
+            
+            return [];
+        } catch (error) {
+            console.error('Error loading existing messages:', error.message);
+            return [];
+        }
+    }
+
+    async getLatestMessageDate(messages) {
+        if (messages.length === 0) {
+            return null;
+        }
+        
+        // Находим самую позднюю дату
+        const latestMessage = messages.reduce((latest, current) => {
+            const currentDate = new Date(current.date);
+            const latestDate = new Date(latest.date);
+            return currentDate > latestDate ? current : latest;
+        });
+        
+        return new Date(latestMessage.date);
+    }
+
+    async getNewMessages(group, sinceDate = null, limit = 1000) {
+        console.log(`\nGetting new messages from "${group.title}"${sinceDate ? ` since ${sinceDate.toLocaleString()}` : ''}...`);
+        
+        const messages = [];
+        let totalMessages = 0;
+
+        for await (const message of this.client.iterMessages(group.entity, { limit })) {
+            if (message.message) {
+                const messageDate = message.date ? new Date(message.date * 1000) : new Date();
+                
+                // Если указана дата, пропускаем старые сообщения
+                if (sinceDate && messageDate <= sinceDate) {
+                    break;
+                }
+                
+                messages.push({
+                    id: message.id,
+                    date: messageDate.toISOString(),
+                    sender: message.sender ? {
+                        id: message.sender.id,
+                        firstName: message.sender.firstName,
+                        lastName: message.sender.lastName,
+                        username: message.sender.username
+                    } : null,
+                    text: message.message,
+                    isForwarded: !!message.fwdFrom,
+                    hasMedia: !!message.media,
+                    mediaType: message.media ? message.media.className : null
+                });
+                totalMessages++;
+                
+                if (totalMessages % 100 === 0) {
+                    console.log(`Found ${totalMessages} new messages...`);
+                }
+            }
+        }
+
+        // Сортируем по дате (старые сначала)
+        messages.sort((a, b) => new Date(a.date) - new Date(b.date));
+        
+        console.log(`\nFound ${totalMessages} new messages total.`);
+        return messages;
+    }
+
+    async updateExistingFile(filePath, newMessages) {
+        if (newMessages.length === 0) {
+            console.log('No new messages to add.');
+            return;
+        }
+
+        try {
+            const existingMessages = await this.loadExistingMessages(filePath);
+            const allMessages = [...existingMessages, ...newMessages];
+            
+            // Удаляем дубликаты по ID
+            const uniqueMessages = allMessages.filter((msg, index, arr) => 
+                arr.findIndex(m => m.id === msg.id) === index
+            );
+            
+            // Сортируем по дате
+            uniqueMessages.sort((a, b) => new Date(a.date) - new Date(b.date));
+            
+            // Создаем резервную копию
+            const backupPath = filePath.replace(/\.json$/, '_backup.json');
+            if (fs.existsSync(filePath)) {
+                fs.copyFileSync(filePath, backupPath);
+                console.log(`Backup created: ${backupPath}`);
+            }
+            
+            // Сохраняем обновленный файл
+            fs.writeFileSync(filePath, JSON.stringify(uniqueMessages, null, 2), 'utf8');
+            console.log(`Updated ${filePath} with ${newMessages.length} new messages`);
+            console.log(`Total messages in file: ${uniqueMessages.length}`);
+            
+        } catch (error) {
+            console.error('Error updating file:', error.message);
+        }
+    }
+
+    async monitorGroupMessages(group, checkInterval = 30000) {
+        console.log(`\nStarting real-time monitoring of "${group.title}"`);
+        console.log(`Check interval: ${checkInterval / 1000} seconds`);
+        console.log('Press Ctrl+C to stop monitoring\n');
+        
+        let lastCheck = new Date();
+        let isRunning = true;
+        
+        // Обработчик для корректного завершения
+        process.on('SIGINT', () => {
+            console.log('\nStopping message monitoring...');
+            isRunning = false;
+        });
+        
+        while (isRunning) {
+            try {
+                await new Promise(resolve => setTimeout(resolve, checkInterval));
+                
+                if (!isRunning) break;
+                
+                const newMessages = await this.getNewMessages(group, lastCheck, 100);
+                
+                if (newMessages.length > 0) {
+                    console.log(`\n📨 ${newMessages.length} new message(s) received:`);
+                    
+                    newMessages.forEach(msg => {
+                        const sender = msg.sender ? 
+                            `${msg.sender.firstName || ''} ${msg.sender.lastName || ''}`.trim() || 
+                            msg.sender.username || 
+                            `User ${msg.sender.id}` : 
+                            'Unknown';
+                        
+                        const time = new Date(msg.date).toLocaleTimeString();
+                        const text = msg.text.length > 100 ? msg.text.substring(0, 100) + '...' : msg.text;
+                        
+                        console.log(`[${time}] ${sender}: ${text}`);
+                    });
+                    
+                    // Предлагаем сохранить в файл
+                    console.log(`\nDo you want to save these messages to a file? (y/n)`);
+                }
+                
+                lastCheck = new Date();
+                
+            } catch (error) {
+                console.error('Error during monitoring:', error.message);
+                await new Promise(resolve => setTimeout(resolve, 5000)); // Ждем 5 секунд при ошибке
+            }
+        }
+        
+        console.log('Message monitoring stopped.');
+    }
+
     async selectGroup() {
         const groups = await this.getDialogs();
         
@@ -402,9 +643,12 @@ class TelegramMessageExporter {
         console.log('1. Export messages from a group/channel');
         console.log('2. Export all contacts, groups, and channels');
         console.log('3. Export members from a group/channel');
-        console.log('4. Exit');
+        console.log('4. Monitor group messages in real-time');
+        console.log('5. Update existing message file with new messages');
+        console.log('6. Session management');
+        console.log('7. Exit');
         
-        const choice = await input.text('\nSelect option (1-4): ');
+        const choice = await input.text('\nSelect option (1-7): ');
         return parseInt(choice);
     }
 
@@ -427,10 +671,19 @@ class TelegramMessageExporter {
                         await this.runMembersExport();
                         break;
                     case 4:
+                        await this.runMessageMonitoring();
+                        break;
+                    case 5:
+                        await this.runUpdateExistingFile();
+                        break;
+                    case 6:
+                        await this.runSessionManagement();
+                        break;
+                    case 7:
                         console.log('\nGoodbye!');
                         return;
                     default:
-                        console.log('\nInvalid choice. Please select 1, 2, 3, or 4.');
+                        console.log('\nInvalid choice. Please select 1-7.');
                         continue;
                 }
 
@@ -496,6 +749,194 @@ class TelegramMessageExporter {
             }
         } catch (error) {
             console.error('Error during members export:', error.message);
+        }
+    }
+
+    async runMessageMonitoring() {
+        try {
+            const selectedGroup = await this.selectGroup();
+            
+            const intervalStr = await input.text('Enter check interval in seconds (default 30): ') || '30';
+            const interval = parseInt(intervalStr) * 1000;
+            
+            await this.monitorGroupMessages(selectedGroup, interval);
+        } catch (error) {
+            console.error('Error during message monitoring:', error.message);
+        }
+    }
+
+    async runUpdateExistingFile() {
+        try {
+            console.log('\n=== Update Existing Message File ===');
+            
+            // Ищем JSON файлы с сообщениями в текущей директории
+            const files = fs.readdirSync('.')
+                .filter(file => file.endsWith('.json') && file.includes('_messages_'))
+                .sort((a, b) => fs.statSync(b).mtime - fs.statSync(a).mtime); // Сортируем по дате изменения
+            
+            if (files.length === 0) {
+                console.log('No message export files found in current directory.');
+                console.log('Please export messages first using option 1.');
+                return;
+            }
+            
+            console.log('\nFound message export files:');
+            files.forEach((file, index) => {
+                const stats = fs.statSync(file);
+                console.log(`${index + 1}. ${file} (${stats.mtime.toLocaleString()})`);
+            });
+            
+            const fileChoice = await input.text('\nSelect file number to update: ');
+            const selectedFile = files[parseInt(fileChoice) - 1];
+            
+            if (!selectedFile) {
+                console.log('Invalid file selection.');
+                return;
+            }
+            
+            // Загружаем существующие сообщения и определяем последнюю дату
+            const existingMessages = await this.loadExistingMessages(selectedFile);
+            const latestDate = await this.getLatestMessageDate(existingMessages);
+            
+            console.log(`\nFile: ${selectedFile}`);
+            console.log(`Current messages: ${existingMessages.length}`);
+            if (latestDate) {
+                console.log(`Latest message date: ${latestDate.toLocaleString()}`);
+            }
+            
+            // Выбираем группу (пытаемся определить по имени файла)
+            const selectedGroup = await this.selectGroup();
+            
+            // Получаем новые сообщения
+            const newMessages = await this.getNewMessages(selectedGroup, latestDate);
+            
+            if (newMessages.length === 0) {
+                console.log('No new messages found since last export.');
+                return;
+            }
+            
+            console.log(`\nFound ${newMessages.length} new messages.`);
+            const confirm = await input.text('Update the file with new messages? (y/n): ');
+            
+            if (confirm.toLowerCase() === 'y' || confirm.toLowerCase() === 'yes') {
+                await this.updateExistingFile(selectedFile, newMessages);
+                console.log('\nFile update completed successfully!');
+            } else {
+                console.log('Update cancelled.');
+            }
+            
+        } catch (error) {
+            console.error('Error during file update:', error.message);
+        }
+    }
+
+    async runSessionManagement() {
+        try {
+            console.log('\n=== Session Management ===');
+            console.log('1. View current session info');
+            console.log('2. Clear saved session (force re-authentication)');
+            console.log('3. Export current session string');
+            console.log('4. Import session string');
+            console.log('5. Back to main menu');
+            
+            const choice = await input.text('\nSelect option (1-5): ');
+            
+            switch (parseInt(choice)) {
+                case 1:
+                    await this.showSessionInfo();
+                    break;
+                case 2:
+                    await this.clearSavedSessionInteractive();
+                    break;
+                case 3:
+                    await this.exportSessionString();
+                    break;
+                case 4:
+                    await this.importSessionString();
+                    break;
+                case 5:
+                    return;
+                default:
+                    console.log('Invalid choice.');
+            }
+        } catch (error) {
+            console.error('Error in session management:', error.message);
+        }
+    }
+
+    async showSessionInfo() {
+        console.log('\n=== Session Information ===');
+        
+        if (fs.existsSync(this.sessionFile)) {
+            const stats = fs.statSync(this.sessionFile);
+            console.log(`Session file: ${this.sessionFile}`);
+            console.log(`Created: ${stats.birthtime.toLocaleString()}`);
+            console.log(`Last modified: ${stats.mtime.toLocaleString()}`);
+            console.log('Status: Session file exists');
+        } else {
+            console.log('Status: No saved session found');
+        }
+        
+        if (this.client && await this.client.checkAuthorization()) {
+            try {
+                const me = await this.client.getMe();
+                console.log(`\nConnected as:`);
+                console.log(`Name: ${me.firstName || ''} ${me.lastName || ''}`);
+                console.log(`Username: @${me.username || 'not set'}`);
+                console.log(`Phone: ${me.phone || 'not available'}`);
+                console.log(`ID: ${me.id}`);
+            } catch (error) {
+                console.log('Could not get user info:', error.message);
+            }
+        } else {
+            console.log('\nStatus: Not currently authenticated');
+        }
+    }
+
+    async clearSavedSessionInteractive() {
+        console.log('\n=== Clear Saved Session ===');
+        console.log('This will force you to re-authenticate on next startup.');
+        
+        const confirm = await input.text('Are you sure? (y/n): ');
+        if (confirm.toLowerCase() === 'y' || confirm.toLowerCase() === 'yes') {
+            this.clearSavedSession();
+            console.log('Session cleared. You will need to re-authenticate on next startup.');
+        } else {
+            console.log('Operation cancelled.');
+        }
+    }
+
+    async exportSessionString() {
+        try {
+            if (this.client && this.client.session) {
+                const sessionString = this.client.session.save();
+                console.log('\n=== Current Session String ===');
+                console.log('Copy this string to backup your session:');
+                console.log(sessionString);
+                console.log('\nKeep this string safe - anyone with it can access your Telegram account!');
+            } else {
+                console.log('No active session to export.');
+            }
+        } catch (error) {
+            console.error('Error exporting session:', error.message);
+        }
+    }
+
+    async importSessionString() {
+        try {
+            console.log('\n=== Import Session String ===');
+            console.log('Warning: This will replace your current session.');
+            
+            const sessionString = await input.text('Enter session string: ');
+            if (sessionString && sessionString.trim()) {
+                fs.writeFileSync(this.sessionFile, sessionString.trim(), 'utf8');
+                console.log('Session string imported and saved.');
+                console.log('Please restart the application to use the new session.');
+            } else {
+                console.log('Invalid session string.');
+            }
+        } catch (error) {
+            console.error('Error importing session:', error.message);
         }
     }
 }

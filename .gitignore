@@ -10,3 +10,9 @@ sb-chr.json
 config.json
 *_messages_*.json
 *_messages_*.csv
+telegram_session.txt
+*_contacts_*.json
+*_contacts_*.csv
+*_members_*.json
+*_members_*.csv
+*_backup.json
