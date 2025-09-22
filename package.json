@@ -4,12 +4,24 @@
   "description": "Telegram tool for exporting messages and contacts from groups, channels and user lists",
   "main": "index.js",
   "scripts": {
+    "build": "tsc",
+    "start": "node dist/demo.js",
+    "dev": "tsc && node dist/demo.js",
+    "demo": "tsc && node dist/demo.js",
+    "extract-text": "tsc && node dist/demo.js extract-text",
+    "convert-markdown": "tsc && node dist/demo.js convert-markdown",
+    "clean": "rm -rf dist",
+    "rebuild": "npm run clean && npm run build",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "message": "node index.js"
+    "legacy:message": "node index.js"
   },
   "private": true,
   "dependencies": {
     "input": "^1.0.1",
     "telegram": "^2.26.22"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^5.9.2"
   }
 }
