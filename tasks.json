@@ -1,0 +1,47 @@
+{
+  "tasks": [
+    {
+      "name": "Export SB CHR messages",
+      "type": "export_messages",
+      "groupId": "4813950746",
+      "enabled": false,
+      "options": {
+        "limit": 1000,
+        "format": "json"
+      }
+    },
+    {
+      "name": "Monitor SB CHR group", 
+      "type": "monitor",
+      "groupId": "4813950746",
+      "enabled": true,
+      "options": {
+        "interval": 3,
+        "saveMessages": true
+      }
+    },
+    {
+      "name": "Export members from channel",
+      "type": "export_members",
+      "groupId": "4813950746",
+      "enabled": false,
+      "options": {
+        "format": "csv",
+        "limit": null
+      }
+    },
+    {
+      "name": "Export all contacts",
+      "type": "export_contacts",
+      "enabled": false,
+      "options": {
+        "format": "json"
+      }
+    }
+  ],
+  "settings": {
+    "outputDir": "exports",
+    "logLevel": "info",
+    "continueOnError": true
+  }
+}

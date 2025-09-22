@@ -11,7 +11,9 @@ class TelegramMessageExporter {
         this.apiHash = null;
         this.session = new StringSession('');
         this.client = null;
-        this.sessionFile = 'telegram_session.txt';
+        this.sessionFile = path.join(__dirname, '../exports/telegram_session.txt');
+        this.tasksFile = path.join(__dirname, '../tasks.json');
+        this.tasksExampleFile = path.join(__dirname, '../tasks.example.json');
     }
 
     loadSavedSession() {
@@ -60,7 +62,7 @@ class TelegramMessageExporter {
         
         // Load configuration
         try {
-            const config = JSON.parse(fs.readFileSync('config.json', 'utf8'));
+            const config = JSON.parse(fs.readFileSync(path.join(__dirname, '../config.json'), 'utf8'));
             this.apiId = config.telegram.apiId;
             this.apiHash = config.telegram.apiHash;
         } catch (error) {
@@ -215,12 +217,12 @@ class TelegramMessageExporter {
 
         switch (format.toLowerCase()) {
             case 'json':
-                filePath = `${fileName}.json`;
+                filePath = path.join(__dirname, `../exports/${fileName}.json`);
                 content = JSON.stringify(allContacts, null, 2);
                 break;
             
             case 'csv':
-                filePath = `${fileName}.csv`;
+                filePath = path.join(__dirname, `../exports/${fileName}.csv`);
                 const csvHeader = 'Type,ID,Name,Username,Phone,Title,ParticipantsCount,IsBot,IsPremium,IsVerified,IsBroadcast,IsMegagroup\n';
                 
                 let csvRows = [];
@@ -350,21 +352,23 @@ class TelegramMessageExporter {
 
         switch (format.toLowerCase()) {
             case 'json':
-                filePath = `${fileName}.json`;
+                filePath = path.join(__dirname, `../exports/${fileName}.json`);
                 content = JSON.stringify({
                     groupInfo: {
-                        id: group.entity.id,
+                        id: group.entity.id.toString(),
                         title: group.title,
                         username: group.entity.username || '',
                         totalMembers: members.length,
-                        exportDate: new Date().toISOString()
+                        exportDate: new Date().toISOString(),
+                        type: group.isChannel ? 'Channel' : 'Group',
+                        className: group.entity.className
                     },
                     members: members
                 }, null, 2);
                 break;
             
             case 'csv':
-                filePath = `${fileName}.csv`;
+                filePath = path.join(__dirname, `../exports/${fileName}.csv`);
                 const csvHeader = 'ID,FirstName,LastName,Username,Phone,Role,IsBot,IsPremium,IsVerified,IsDeleted,IsContact,JoinDate,LastSeenStatus\n';
                 const csvRows = members.map(member => {
                     const firstName = member.firstName.replace(/"/g, '""');
@@ -552,22 +556,96 @@ class TelegramMessageExporter {
         console.log('Message monitoring stopped.');
     }
 
-    async selectGroup() {
-        const groups = await this.getDialogs();
+    async getGroupById(groupId) {
+        const idsToTry = [groupId];
         
-        console.log('\nAvailable groups and channels:');
-        groups.forEach((group, index) => {
-            console.log(`${index + 1}. ${group.title} (${group.isChannel ? 'Channel' : 'Group'})`);
-        });
-
-        const choice = await input.text('\nSelect group number: ');
-        const selectedGroup = groups[parseInt(choice) - 1];
-        
-        if (!selectedGroup) {
-            throw new Error('Invalid selection');
+        // Если это положительное число, добавляем варианты с минусом
+        if (/^\d+$/.test(groupId)) {
+            idsToTry.push(`-${groupId}`);
+            idsToTry.push(`-100${groupId}`);
         }
+        
+        let lastError = null;
+        
+        for (const id of idsToTry) {
+            try {
+                console.log(`Trying ID: ${id}...`);
+                const entity = await this.client.getEntity(id);
+                
+                // Проверяем тип сущности
+                if (entity.className === 'User') {
+                    console.log(`ID ${id} is a user, trying next variant...`);
+                    continue;
+                }
+                
+                if (entity.className !== 'Chat' && entity.className !== 'Channel') {
+                    console.log(`ID ${id} is ${entity.className}, trying next variant...`);
+                    continue;
+                }
+                
+                console.log(`✅ Found group/channel with ID ${id}!`);
+                return {
+                    entity: entity,
+                    title: entity.title || entity.firstName || 'Unknown',
+                    isChannel: entity.className === 'Channel',
+                    isGroup: entity.className === 'Chat' || entity.className === 'Channel'
+                };
+            } catch (error) {
+                console.log(`❌ ID ${id} failed: ${error.message.split('.')[0]}`);
+                lastError = error;
+                continue;
+            }
+        }
+        
+        // Если ничего не найдено
+        const suggestions = [];
+        if (/^\d+$/.test(groupId)) {
+            suggestions.push(`Tried: ${idsToTry.join(', ')}`);
+            suggestions.push('Make sure this group/channel exists and you have access to it');
+            suggestions.push('Try using username instead (e.g., @channelname)');
+        }
+        
+        throw new Error(`Cannot find group with any variant of ID ${groupId}.\n\nSuggestions:\n• ${suggestions.join('\n• ')}\n\nLast error: ${lastError?.message || 'Unknown error'}`);
+    }
 
-        return selectedGroup;
+    async selectGroup() {
+        console.log('\nHow would you like to select the group?');
+        console.log('1. Choose from your groups/channels list');
+        console.log('2. Enter group/channel ID directly');
+        console.log('3. Enter group/channel username (e.g., @channelname)');
+        
+        const selectionMethod = await input.text('\nSelect method (1-3): ');
+        
+        if (selectionMethod === '2') {
+            console.log('\n💡 Group/Channel ID examples:');
+            console.log('   • Supergroup: -1001234567890');
+            console.log('   • Regular group: -1234567890');
+            console.log('   • Channel: -1001234567890');
+            console.log('   Note: Group IDs are usually negative numbers\n');
+            
+            const groupId = await input.text('Enter group/channel ID: ');
+            return await this.getGroupById(groupId);
+        } else if (selectionMethod === '3') {
+            const username = await input.text('Enter username (with or without @): ');
+            const cleanUsername = username.startsWith('@') ? username : '@' + username;
+            return await this.getGroupById(cleanUsername);
+        } else {
+            const groups = await this.getDialogs();
+            
+            console.log('\nAvailable groups and channels:');
+            groups.forEach((group, index) => {
+                console.log(`${index + 1}. ${group.title} (ID: ${group.entity.id}) (${group.isChannel ? 'Channel' : 'Group'})`);
+            });
+
+            const choice = await input.text('\nSelect group number: ');
+            const selectedGroup = groups[parseInt(choice) - 1];
+            
+            if (!selectedGroup) {
+                throw new Error('Invalid selection');
+            }
+
+            return selectedGroup;
+        }
     }
 
     async exportMessages(group, limit = 1000) {
@@ -613,12 +691,12 @@ class TelegramMessageExporter {
 
         switch (format.toLowerCase()) {
             case 'json':
-                filePath = `${fileName}.json`;
+                filePath = path.join(__dirname, `../exports/${fileName}.json`);
                 content = JSON.stringify(messages, null, 2);
                 break;
             
             case 'csv':
-                filePath = `${fileName}.csv`;
+                filePath = path.join(__dirname, `../exports/${fileName}.csv`);
                 const csvHeader = 'ID,Date,Sender,Username,Text,IsForwarded,HasMedia,MediaType\n';
                 const csvRows = messages.map(msg => {
                     const sender = msg.sender ? msg.sender.firstName + ' ' + (msg.sender.lastName || '') : '';
@@ -638,6 +716,18 @@ class TelegramMessageExporter {
         return filePath;
     }
 
+    async showGroupInfo(group) {
+        console.log(`\n=== Group Information ===`);
+        console.log(`Title: ${group.title}`);
+        console.log(`ID: ${group.entity.id}`);
+        console.log(`Username: ${group.entity.username ? '@' + group.entity.username : 'No username'}`);
+        console.log(`Type: ${group.isChannel ? 'Channel' : 'Group'}`);
+        if (group.entity.participantsCount) {
+            console.log(`Members: ${group.entity.participantsCount}`);
+        }
+        console.log(`=========================\n`);
+    }
+
     async showMainMenu() {
         console.log('\n=== Main Menu ===');
         console.log('1. Export messages from a group/channel');
@@ -646,9 +736,14 @@ class TelegramMessageExporter {
         console.log('4. Monitor group messages in real-time');
         console.log('5. Update existing message file with new messages');
         console.log('6. Session management');
-        console.log('7. Exit');
+        console.log('7. Show group/channel information by ID');
+        console.log('8. 🚀 Export messages by group ID (direct)');
+        console.log('9. 📡 Monitor group by ID (direct)');
+        console.log('10. Exit');
+        console.log('\n💡 Options 1, 3, 4, 7 - interactive group selection');
+        console.log('💡 Options 8, 9 - direct ID input (faster workflow)');
         
-        const choice = await input.text('\nSelect option (1-7): ');
+        const choice = await input.text('\nSelect option (1-10): ');
         return parseInt(choice);
     }
 
@@ -680,10 +775,19 @@ class TelegramMessageExporter {
                         await this.runSessionManagement();
                         break;
                     case 7:
+                        await this.runShowGroupInfo();
+                        break;
+                    case 8:
+                        await this.runDirectMessageExport();
+                        break;
+                    case 9:
+                        await this.runDirectMonitoring();
+                        break;
+                    case 10:
                         console.log('\nGoodbye!');
                         return;
                     default:
-                        console.log('\nInvalid choice. Please select 1-7.');
+                        console.log('\nInvalid choice. Please select 1-10.');
                         continue;
                 }
 
@@ -769,10 +873,10 @@ class TelegramMessageExporter {
         try {
             console.log('\n=== Update Existing Message File ===');
             
-            // Ищем JSON файлы с сообщениями в текущей директории
-            const files = fs.readdirSync('.')
+            // Ищем JSON файлы с сообщениями в папке exports
+            const files = fs.readdirSync(path.join(__dirname, '../exports'))
                 .filter(file => file.endsWith('.json') && file.includes('_messages_'))
-                .sort((a, b) => fs.statSync(b).mtime - fs.statSync(a).mtime); // Сортируем по дате изменения
+                .sort((a, b) => fs.statSync(path.join(__dirname, `../exports/${b}`)).mtime - fs.statSync(path.join(__dirname, `../exports/${a}`)).mtime); // Сортируем по дате изменения
             
             if (files.length === 0) {
                 console.log('No message export files found in current directory.');
@@ -782,7 +886,7 @@ class TelegramMessageExporter {
             
             console.log('\nFound message export files:');
             files.forEach((file, index) => {
-                const stats = fs.statSync(file);
+                const stats = fs.statSync(path.join(__dirname, `../exports/${file}`));
                 console.log(`${index + 1}. ${file} (${stats.mtime.toLocaleString()})`);
             });
             
@@ -795,7 +899,7 @@ class TelegramMessageExporter {
             }
             
             // Загружаем существующие сообщения и определяем последнюю дату
-            const existingMessages = await this.loadExistingMessages(selectedFile);
+            const existingMessages = await this.loadExistingMessages(path.join(__dirname, `../exports/${selectedFile}`));
             const latestDate = await this.getLatestMessageDate(existingMessages);
             
             console.log(`\nFile: ${selectedFile}`);
@@ -819,7 +923,7 @@ class TelegramMessageExporter {
             const confirm = await input.text('Update the file with new messages? (y/n): ');
             
             if (confirm.toLowerCase() === 'y' || confirm.toLowerCase() === 'yes') {
-                await this.updateExistingFile(selectedFile, newMessages);
+                await this.updateExistingFile(path.join(__dirname, `../exports/${selectedFile}`), newMessages);
                 console.log('\nFile update completed successfully!');
             } else {
                 console.log('Update cancelled.');
@@ -939,9 +1043,278 @@ class TelegramMessageExporter {
             console.error('Error importing session:', error.message);
         }
     }
+
+    async runShowGroupInfo() {
+        try {
+            const selectedGroup = await this.selectGroup();
+            await this.showGroupInfo(selectedGroup);
+        } catch (error) {
+            console.error('Error getting group information:', error.message);
+        }
+    }
+
+    async runDirectMessageExport() {
+        try {
+            console.log('\n=== Export Messages by Group ID (Direct) ===');
+            console.log('💡 Examples: 1382016702, -1001234567890, @channelname');
+            
+            const groupId = await input.text('Enter group/channel ID or username: ');
+            if (!groupId.trim()) {
+                console.log('Invalid input. Please enter a valid ID or username.');
+                return;
+            }
+
+            console.log('\n🔍 Looking up group...');
+            const selectedGroup = await this.getGroupById(groupId.trim());
+            
+            await this.showGroupInfo(selectedGroup);
+            
+            const messageLimit = await input.text('Enter message limit (default 1000): ') || '1000';
+            const exportFormat = await input.text('Enter export format (json/csv, default json): ') || 'json';
+            
+            const messages = await this.exportMessages(selectedGroup, parseInt(messageLimit));
+            
+            if (messages.length > 0) {
+                await this.saveToFile(messages, selectedGroup.title, exportFormat);
+                console.log('\n✅ Message export completed successfully!');
+            } else {
+                console.log('No messages found to export.');
+            }
+        } catch (error) {
+            console.error('Error during direct message export:', error.message);
+        }
+    }
+
+    async runDirectMonitoring() {
+        try {
+            console.log('\n=== Monitor Group by ID (Direct) ===');
+            console.log('💡 Examples: 1382016702, -1001234567890, @channelname');
+            
+            const groupId = await input.text('Enter group/channel ID or username: ');
+            if (!groupId.trim()) {
+                console.log('Invalid input. Please enter a valid ID or username.');
+                return;
+            }
+
+            console.log('\n🔍 Looking up group...');
+            const selectedGroup = await this.getGroupById(groupId.trim());
+            
+            await this.showGroupInfo(selectedGroup);
+            
+            const intervalStr = await input.text('Enter check interval in seconds (default 30): ') || '30';
+            const interval = parseInt(intervalStr) * 1000;
+            
+            await this.monitorGroupMessages(selectedGroup, interval);
+        } catch (error) {
+            console.error('Error during direct monitoring:', error.message);
+        }
+    }
+
+    async loadTasks() {
+        try {
+            if (!fs.existsSync(this.tasksFile)) {
+                console.log(`Tasks file not found: ${this.tasksFile}`);
+                console.log(`Please copy ${this.tasksExampleFile} to ${this.tasksFile} and configure your tasks.`);
+                return null;
+            }
+            
+            const content = fs.readFileSync(this.tasksFile, 'utf8');
+            const config = JSON.parse(content);
+            
+            if (!config.tasks || !Array.isArray(config.tasks)) {
+                throw new Error('Invalid tasks configuration: missing tasks array');
+            }
+            
+            return config;
+        } catch (error) {
+            console.error('Error loading tasks configuration:', error.message);
+            return null;
+        }
+    }
+
+    async executeTask(task, taskConfig) {
+        console.log(`\n🚀 Executing task: ${task.name}`);
+        console.log(`📋 Type: ${task.type}`);
+        
+        try {
+            switch (task.type) {
+                case 'export_messages':
+                    await this.executeExportMessages(task);
+                    break;
+                case 'monitor':
+                    await this.executeMonitor(task);
+                    break;
+                case 'export_members':
+                    await this.executeExportMembers(task);
+                    break;
+                case 'export_contacts':
+                    await this.executeExportContacts(task);
+                    break;
+                default:
+                    console.log(`❌ Unknown task type: ${task.type}`);
+                    return false;
+            }
+            
+            console.log(`✅ Task "${task.name}" completed successfully`);
+            return true;
+        } catch (error) {
+            console.error(`❌ Task "${task.name}" failed:`, error.message);
+            return false;
+        }
+    }
+
+    async executeExportMessages(task) {
+        console.log(`🔍 Looking up group ${task.groupId}...`);
+        const group = await this.getGroupById(task.groupId);
+        
+        console.log(`📨 Exporting messages from "${group.title}"...`);
+        const limit = task.options?.limit || 1000;
+        const format = task.options?.format || 'json';
+        
+        const messages = await this.exportMessages(group, limit);
+        if (messages.length > 0) {
+            await this.saveToFile(messages, group.title, format);
+            console.log(`💾 Saved ${messages.length} messages`);
+        } else {
+            console.log('📭 No messages found');
+        }
+    }
+
+    async executeMonitor(task) {
+        console.log(`🔍 Looking up group ${task.groupId}...`);
+        const group = await this.getGroupById(task.groupId);
+        
+        const interval = (task.options?.interval || 30) * 1000;
+        console.log(`📡 Starting monitoring of "${group.title}" (interval: ${interval/1000}s)`);
+        console.log('Press Ctrl+C to stop monitoring');
+        
+        await this.monitorGroupMessages(group, interval);
+    }
+
+    async executeExportMembers(task) {
+        console.log(`🔍 Looking up group ${task.groupId}...`);
+        const group = await this.getGroupById(task.groupId);
+        
+        console.log(`👥 Exporting members from "${group.title}"...`);
+        const format = task.options?.format || 'json';
+        const limit = task.options?.limit || null;
+        
+        const filePath = await this.exportGroupMembers(group, format, limit);
+        if (filePath) {
+            console.log(`💾 Members exported successfully`);
+        }
+    }
+
+    async executeExportContacts(task) {
+        console.log(`📇 Exporting all contacts...`);
+        const format = task.options?.format || 'json';
+        
+        await this.exportAllContacts(format);
+        console.log(`💾 Contacts exported successfully`);
+    }
+
+    async runBatchTasks() {
+        const config = await this.loadTasks();
+        if (!config) {
+            return;
+        }
+
+        const enabledTasks = config.tasks.filter(task => task.enabled);
+        
+        if (enabledTasks.length === 0) {
+            console.log('📭 No enabled tasks found in configuration');
+            return;
+        }
+
+        console.log(`\n🎯 Found ${enabledTasks.length} enabled task(s) to execute:`);
+        enabledTasks.forEach((task, index) => {
+            console.log(`   ${index + 1}. ${task.name} (${task.type})`);
+        });
+
+        const continueOnError = config.settings?.continueOnError !== false;
+        let successCount = 0;
+        let failCount = 0;
+
+        for (const task of enabledTasks) {
+            const success = await this.executeTask(task, config);
+            
+            if (success) {
+                successCount++;
+            } else {
+                failCount++;
+                if (!continueOnError) {
+                    console.log('🛑 Stopping execution due to error (continueOnError: false)');
+                    break;
+                }
+            }
+        }
+
+        console.log(`\n📊 Batch execution summary:`);
+        console.log(`   ✅ Successful: ${successCount}`);
+        console.log(`   ❌ Failed: ${failCount}`);
+        console.log(`   📋 Total: ${enabledTasks.length}`);
+    }
+}
+
+async function main() {
+    const args = process.argv.slice(2);
+    const exporter = new TelegramMessageExporter();
+    
+    // Проверяем аргументы командной строки
+    if (args.includes('--help') || args.includes('-h')) {
+        console.log(`
+🚀 Telegram Message Exporter - Command Line Usage
+
+📋 Interactive Mode:
+   npm start
+   node src/index.js
+
+⚡ Batch Mode (execute configured tasks):
+   npm run batch
+   node src/index.js --batch
+   node src/index.js -b
+
+📄 Configuration:
+   Copy tasks.example.json to tasks.json and configure your tasks
+   
+📖 Examples:
+   # Run in interactive mode
+   npm start
+   
+   # Execute all enabled tasks from tasks.json
+   npm run batch
+   
+   # Show this help
+   node src/index.js --help
+
+🎯 Task Types:
+   • export_messages  - Export messages from a group/channel
+   • monitor          - Monitor group messages in real-time  
+   • export_members   - Export group/channel members
+   • export_contacts  - Export all contacts
+`);
+        return;
+    }
+    
+    if (args.includes('--batch') || args.includes('-b')) {
+        console.log('🎯 Starting batch mode...');
+        await exporter.initialize();
+        await exporter.authenticate();
+        await exporter.runBatchTasks();
+        
+        if (exporter.client) {
+            await exporter.client.disconnect();
+        }
+        return;
+    }
+    
+    // Интерактивный режим по умолчанию
+    await exporter.run();
 }
 
 if (require.main === module) {
-    const exporter = new TelegramMessageExporter();
-    exporter.run();
+    main().catch(error => {
+        console.error('Fatal error:', error.message);
+        process.exit(1);
+    });
 }
