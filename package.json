@@ -1,7 +1,7 @@
 {
   "name": "untitled1",
   "version": "1.0.0",
-  "description": "Telegram message exporter tool for groups and channels",
+  "description": "Telegram tool for exporting messages and contacts from groups, channels and user lists",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
